@@ -9,13 +9,49 @@
 #include <map>
 #include <vector>
 
+#include <boost/unordered_map.hpp>
+#include <boost/array.hpp>
+#include <boost/assign.hpp>
+#include <boost/range/adaptor/transformed.hpp>
+#include <boost/lambda/lambda.hpp>
+#include <boost/spirit/include/phoenix.hpp>
+#include <boost/spirit/include/karma.hpp>
+#include <boost/function_types/result_type.hpp>
+
 #include <cppconn/driver.h>
 #include <cppconn/exception.h>
 #include <cppconn/resultset.h>
 #include <cppconn/statement.h>
 #include <cppconn/prepared_statement.h>
+#include <cppconn/datatype.h>
 
 using namespace std;
+
+#define DEBUG_OUTPUT_SQLEXCEPTION(e)    cout << "# ERR: SQLException in " << __FILE__; \
+                                        cout << "(" << __FUNCTION__ << ") on line " << __LINE__ << endl; \
+                                        cout << "# ERR: " << e.what(); \
+                                        cout << " (MySQL error code: " << e.getErrorCode(); \
+                                        cout << ", SQLState: " << e.getSQLState() << ")" << endl;
+
+
+
+template<typename F>
+struct result_type_wrapper : boost::function_types::result_type<decltype(&F::operator())>
+{
+};
+
+template<typename F>
+struct adaptable_wrapper : F
+{
+    typedef typename result_type_wrapper<F>::type result_type;
+    adaptable_wrapper(F f) : F(f) {}
+};
+
+template<typename F>
+adaptable_wrapper<F> make_adaptable(F f)
+{
+    return adaptable_wrapper<F>(f);
+}
 
 enum QueryType {
     QT_NONE,
@@ -25,13 +61,30 @@ enum QueryType {
     QT_DELETE
 };
 
+enum DataType{
+    LONG,
+    INT,
+    FLOAT,
+    STRING
+};
+
+class QueryResultCursor;
 class DaoQueryBuilder;
+
+typedef shared_ptr<sql::ResultSet>          ResultSetPtr;
+typedef shared_ptr<sql::Statement>          StmtPtr;
+typedef shared_ptr<QueryResultCursor>       CursorPtr;
+
+typedef uint32_t                            idx_t;
+
+
 
 class DaoQuery {
 friend class DaoQueryBuilder;
 public:
     string getContent() const;
     QueryType getQueryType() const;
+    bool hasReturnResult() const;
 private:
     void setQueryType(QueryType qt);
     void setSqlContent(const string& sql);
@@ -44,15 +97,16 @@ class DaoQueryBuilder {
 public:
     static unique_ptr<DaoQueryBuilder> newBuilder();
 
-    shared_ptr<DaoQueryBuilder> setQueryFields(const vector<string>& fields);
+    void setQueryFields(const vector<string>& fields);
+    void setTable(const char* table);
 
-    shared_ptr<DaoQueryBuilder> addQueryCondition(const char* key, const int value);
-    shared_ptr<DaoQueryBuilder> addQueryCondition(const char* key, const char* value);
-    shared_ptr<DaoQueryBuilder> addQueryCondition(const char* key, const vector<string>& valueList);
-    shared_ptr<DaoQueryBuilder> addQueryCondition(const char* key, const vector<int>& valueList);
+    void addQueryCondition(const char* key, const int value);
+    void addQueryCondition(const char* key, const char* value);
+    void addQueryCondition(const char* key, const vector<string>& valueList);
+    void addQueryCondition(const char* key, const vector<int>& valueList);
 
-    shared_ptr<DaoQueryBuilder> setQueryType(QueryType qt);
-    unique_ptr<DaoQuery> build();
+    void setQueryType(QueryType qt);
+    shared_ptr<DaoQuery> build();
 
 private:
 
@@ -83,29 +137,70 @@ private:
 /**
  * include the result for query, insert, update and delete
  */
-class QueryResultSet{
+template <typename T>
+class QueryResultSet {
 
+friend class MySQLDao;
+public:
+
+    QueryResultSet();
+    size_t size() const;
+
+    typename vector<shared_ptr<T>>::iterator begin();
+    typename vector<shared_ptr<T>>::iterator end();
+
+private:
+    void addQueryResult(shared_ptr<T> item);
+
+    vector<shared_ptr<T>> resultSet;
 };
 
+class QueryResultCursor {
+public:
+
+    static CursorPtr makeCursor(ResultSetPtr source){ return CursorPtr(new QueryResultCursor(source)); }
+
+    inline int getInt(idx_t index){ return resultSource->getInt(index); }
+    inline int getInt(string name){ return resultSource->getInt(name); }
+
+    inline int64_t getInt64(idx_t index) { return resultSource->getInt64(index); }
+    inline int64_t getInt64(string name) { return resultSource->getInt64(name); }
+
+    inline string getString(idx_t index) { return resultSource->getString(index); }
+    inline string getString(string name) { return resultSource->getString(name); }
+
+private:
+    QueryResultCursor(ResultSetPtr source): resultSource(source) {} // private constructor
+    ResultSetPtr resultSource;
+};
+
+template <typename T>
 class MySQLDao {
 public:
+
     MySQLDao();
     ~MySQLDao();
 
     int init();
 
-    QueryResultSet query(const DaoQuery& query);
+    int query(const DaoQuery& query, QueryResultSet<T>& resultSet);
     int update();
     int insert();
+
 
     virtual string getDatabaseName() const;
     virtual string getUser() const;
     virtual string getPwd() const;
+    virtual string getHost() const;
+    virtual int getPort() const;
 
 protected:
-    string host;
-    int port;
+    inline CursorPtr makeCursor(ResultSetPtr source) { return QueryResultCursor::makeCursor(source); }
 
+    virtual shared_ptr<T> createInstance(CursorPtr cursor);
+
+    // These resource should be shared among all instances for the same host/port
+    // But we should check whether cpp driver shared the connection ??
     sql::Driver *driver;
     sql::Connection * connecton;
 };

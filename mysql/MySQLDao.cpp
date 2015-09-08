@@ -6,6 +6,7 @@
 #include <boost/format.hpp>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/range/adaptor/transformed.hpp>
+#include <boost/smart_ptr/scoped_ptr.hpp>
 
 #include "MySQLDao.h"
 
@@ -17,39 +18,67 @@ int MySQLDao::init() {
 
     try {
         stringstream ss;
-        ss << boost::format("tcp://%s:%d") % this->host % this->port;
+        ss << boost::format("tcp://%s:%d") % this->getHost() % this->getPort();
         string targetHost;
         ss >> targetHost;
 
-        this->connecton = this->driver->connect(targetHost, this->getUser(), this->getPwd());
-    } catch (sql::SQLException &e) {
-        cout << "# ERR: SQLException in " << __FILE__;
-        cout << "(" << __FUNCTION__ << ") on line " << __LINE__ << endl;
-        cout << "# ERR: " << e.what();
-        cout << " (MySQL error code: " << e.getErrorCode();
-        cout << ", SQLState: " << e.getSQLState() << " )" << endl;
+        cout << "Try to connect the MySQL server: " << targetHost << endl;
 
+        this->connecton = this->driver->connect(targetHost, this->getUser(), this->getPwd());
+        StmtPtr stmtPtr(this->connecton->createStatement());
+        stmtPtr->execute("USE " + this->getDatabaseName());
+
+    } catch (sql::SQLException &e) {
+        DEBUG_OUTPUT_SQLEXCEPTION(e);
         return EXIT_FAILURE;
     }
 
     return EXIT_SUCCESS;
 }
 
-MySQLDao::MySQLDao(): host("localhost"),
-                      port(3306){
+MySQLDao::MySQLDao(){
     this->driver = get_driver_instance();
     this->connecton = nullptr;
 }
 
 MySQLDao::~MySQLDao() {
     if (this->connecton != nullptr){
-        delete(this->connecton);
+        delete this->connecton;
     }
 }
 
+template <typename T>
+int MySQLDao::query(const DaoQuery& query, QueryResultSet<T>& returnSet) {
+    assert(this->connecton != nullptr);
 
-QueryResultSet MySQLDao::query(const DaoQuery& query) {
+    if(query.hasReturnResult()){
+        StmtPtr stmt(this->connecton->createStatement());
+        ResultSetPtr resultSet(stmt->executeQuery(query.getContent().c_str()));
 
+        try{
+            sql::ResultSetMetaData* metaData = resultSet->getMetaData();
+            unsigned int columnCount = metaData->getColumnCount();
+            for(unsigned int i = 1; i <= columnCount; i++){
+                int type = metaData->getColumnType(i);
+                string typeName = metaData->getColumnTypeName(i);
+
+                cout << "Column [" << i << "] type=" << type << ", name=" << typeName << endl;
+            }
+
+            while(resultSet->next()){
+                shared_ptr<T> result = createInstance(makeCursor(resultSet));
+                returnSet.addQueryResult(result);
+            }
+
+
+        }catch(sql::InvalidArgumentException& e){
+            DEBUG_OUTPUT_SQLEXCEPTION(e);
+        }
+
+
+    }
+
+    return EXIT_SUCCESS;
 }
 
 unique_ptr<DaoQueryBuilder> DaoQueryBuilder::newBuilder() {
@@ -61,27 +90,23 @@ DaoQueryBuilder::DaoQueryBuilder() {
 
 }
 
-shared_ptr<DaoQueryBuilder> DaoQueryBuilder::addQueryCondition(const char *key, const int value) {
+void DaoQueryBuilder::addQueryCondition(const char *key, const int value) {
     this->intTypeConds[key] = value;
-    return shared_ptr<DaoQueryBuilder>(this);
 }
 
-shared_ptr<DaoQueryBuilder> DaoQueryBuilder::addQueryCondition(const char *key, const char *value) {
+void DaoQueryBuilder::addQueryCondition(const char *key, const char *value) {
     this->strTypeConds[key] = value;
-    return shared_ptr<DaoQueryBuilder>(this);
 }
 
-shared_ptr<DaoQueryBuilder> DaoQueryBuilder::addQueryCondition(const char *key, const vector<string> &valueList) {
+void DaoQueryBuilder::addQueryCondition(const char *key, const vector<string> &valueList) {
     this->strListTypeConds[key] = valueList;
-    return shared_ptr<DaoQueryBuilder>(this);
 }
 
-shared_ptr<DaoQueryBuilder> DaoQueryBuilder::addQueryCondition(const char *key, const vector<int> &valueList) {
+void DaoQueryBuilder::addQueryCondition(const char *key, const vector<int> &valueList) {
     this->intListTypeConds[key] = valueList;
-    return shared_ptr<DaoQueryBuilder>(this);
 }
 
-unique_ptr<DaoQuery> DaoQueryBuilder::build() {
+shared_ptr<DaoQuery> DaoQueryBuilder::build() {
     if(this->qt == QT_NONE){
         return nullptr;
     }
@@ -104,12 +129,11 @@ unique_ptr<DaoQuery> DaoQueryBuilder::build() {
             return nullptr;
     }
 
-    return unique_ptr<DaoQuery>(daoQueryPtr.get());
+    return daoQueryPtr;
 }
 
-shared_ptr<DaoQueryBuilder> DaoQueryBuilder::setQueryType(QueryType qt) {
+void DaoQueryBuilder::setQueryType(QueryType qt) {
     this->qt = qt;
-    return shared_ptr<DaoQueryBuilder>(this);
 }
 
 void DaoQueryBuilder::processInsertQuery(DaoQuery* const query) {
@@ -123,7 +147,7 @@ void DaoQueryBuilder::processSelectQuery(DaoQuery* const query) {
         ss << "* ";
     }
     else{
-        ss << boost::algorithm::join(this->targetFields, " ");
+        ss << boost::algorithm::join(this->targetFields, ", ");
     }
     ss << " from " << this->tableName;
 
@@ -134,10 +158,12 @@ void DaoQueryBuilder::processSelectQuery(DaoQuery* const query) {
     transform(strTypeConds.begin(), strTypeConds.end(), back_inserter(condSmts), [](StringMapEntryType p){
         return (boost::format("%s='%d'") % p.first % p.second).str();
     });
+
     transform(intListTypeConds.begin(), intListTypeConds.end(), back_inserter(condSmts), [](IntListMapEntryType p){
         string joins = boost::algorithm::join(p.second | boost::adaptors::transformed(int2String()), ",");
         return (boost::format("%s in (%s)") % p.first % joins).str();
     });
+
     transform(strListTypeConds.begin(), strListTypeConds.end(), back_inserter(condSmts), [](StringListMapEntryType p){
         return (boost::format("%s in ('%s')") % p.first % boost::algorithm::join(p.second, "','")).str();
     });
@@ -145,6 +171,8 @@ void DaoQueryBuilder::processSelectQuery(DaoQuery* const query) {
     if(condSmts.size() > 0){
         ss << " where " << boost::algorithm::join(condSmts, " and ");
     }
+
+    ss << ";";
 
     query->setQueryType(this->qt);
     query->setSqlContent(ss.str());
@@ -158,9 +186,8 @@ void DaoQueryBuilder::processUpdateQuery(DaoQuery* const query) {
 
 }
 
-shared_ptr<DaoQueryBuilder> DaoQueryBuilder::setQueryFields(const vector<string> &fields) {
+void DaoQueryBuilder::setQueryFields(const vector<string> &fields) {
     this->targetFields.assign(fields.begin(), fields.end());
-    return shared_ptr<DaoQueryBuilder>(this);
 }
 
 void DaoQuery::setSqlContent(const string& sql) {
@@ -168,7 +195,7 @@ void DaoQuery::setSqlContent(const string& sql) {
 }
 
 void DaoQuery::setQueryType(QueryType qt) {
-    this->setQueryType(qt);
+    this->qt = qt;
 }
 
 string DaoQuery::getContent() const {
@@ -177,4 +204,60 @@ string DaoQuery::getContent() const {
 
 QueryType DaoQuery::getQueryType() const {
     return this->qt;
+}
+
+string MySQLDao::getDatabaseName() const {
+    return "log_statistics";
+}
+
+string MySQLDao::getUser() const {
+    return "root";
+}
+
+string MySQLDao::getPwd() const {
+    return "";
+}
+
+int MySQLDao::update() {
+    return 0;
+}
+
+int MySQLDao::insert() {
+    return 0;
+}
+
+void DaoQueryBuilder::setTable(const char *table) {
+    this->tableName = table;
+}
+
+bool DaoQuery::hasReturnResult() const {
+    return this->qt == QT_SELECT;
+}
+
+
+QueryResultSet::QueryResultSet():resultSet(10){
+
+}
+
+size_t QueryResultSet::size() const {
+    return resultSet.size();
+}
+
+template <typename T>
+void QueryResultSet::addQueryResult(shared_ptr<T> item) {
+    this->resultSet.push_back(item);
+}
+
+string MySQLDao::getHost() const {
+    return "localhost";
+}
+
+template <typename T>
+typename vector<shared_ptr<T>>::iterator QueryResultSet::begin() {
+    return resultSet.begin();
+}
+
+template <typename T>
+typename vector<shared_ptr<T>>::iterator QueryResultSet::end() {
+    return resultSet.end();
 }
