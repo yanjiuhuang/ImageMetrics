@@ -16,37 +16,48 @@ typedef boost::gregorian::date              date_t;
 typedef int64_t                             flow_t;
 typedef int64_t                             req_size_t;
 
+namespace imgmetrics {
 
-class ImgMetric{
-public:
+    class ImgMetric{
+    public:
 
-    ImgMetric();
-    ImgMetric(string formatDate, flow_t& flow, req_size_t& reqCount);
+        ImgMetric();
+        ImgMetric(const string& formatDate, flow_t& flow, req_size_t& reqCount);
 
-    inline date_t getDate() const{ return this->recordDate; }
-    inline flow_t getFlowAmount() const { return this->metricFlowAmount; }
-    inline req_size_t getRequestCount() const { return this->reqCount; }
+        inline date_t getDate() const{ return this->recordDate; }
+        inline flow_t getFlowAmount() const { return this->metricFlowAmount; }
+        inline req_size_t getRequestCount() const { return this->reqCount; }
 
-    ostream& operator<<(ostream& os, const ImgMetric& dt);
+        friend ostream& operator<<(ostream& os, const ImgMetric& dt){
+            os << "Date=" << dt.getDate() << " ";
+            os << "RequestCount=" << dt.getRequestCount() << " ";
+            os << "FlowAmount=" << dt.getFlowAmount() << " ";
+            return os;
+        }
 
-private:
-    date_t      recordDate;
-    flow_t      metricFlowAmount;
-    req_size_t  reqCount;
+    private:
+        date_t      recordDate;
+        flow_t      metricFlowAmount;
+        req_size_t  reqCount;
 
-};
+    };
 
-class ImgMetricDao : public MySQLDao<ImgMetric>{
-public:
+    class ImgMetricDao : public MySQLDao<ImgMetric>{
+    public:
 
-    virtual string getHost() const;
-    virtual int getPort() const;
-    virtual string getDatabaseName() const;
+        virtual void saveInstance(ImgMetric& t);
 
-protected:
-    virtual shared_ptr<ImgMetric> createInstance(CursorPtr cursor);
+        virtual string getHost() const;
+        virtual int getPort() const;
+        virtual string getDatabaseName() const;
 
-};
+    protected:
+        virtual shared_ptr<ImgMetric> createInstance(CursorPtr cursor);
+
+    };
+}
+
+
 
 
 #endif //IMAGEMETRICS_IMGMETRICDAO_H
